@@ -176,6 +176,7 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
       };
 
       recognition.onresult = (event: SpeechRecognitionEvent) => {
+        recognitionRestartCountRef.current = 0; // reset on any result
         let finalTranscript = '';
         let interim = '';
         for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -207,7 +208,7 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
 
       recognition.onend = () => {
         if (!isRecordingRef.current) return;
-        if (recognitionRestartCountRef.current >= 10) {
+        if (recognitionRestartCountRef.current >= 50) {
           setRecognitionFailed(true);
           return;
         }
@@ -250,7 +251,7 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
     }
 
     const AudioContextClass = (window.AudioContext || (window as any).webkitAudioContext);
-    const audioContext = new AudioContextClass({ sampleRate: 16000 });
+    const audioContext = new AudioContextClass();
     audioContextRef.current = audioContext;
 
     if (audioContext.state === 'suspended') {
@@ -262,9 +263,6 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
     setIsRecording(true);
     isRecordingRef.current = true;
 
-    // Start Web Speech API for live transcription
-    startSpeechRecognition();
-
     try {
       const mimeType = getSupportedMimeType();
       const mediaRecorder = new MediaRecorder(stream, { mimeType });
@@ -275,6 +273,11 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
         if (event.data.size > 0) audioChunksRef.current.push(event.data);
       };
       mediaRecorder.start(1000);
+
+      // Start speech recognition after MediaRecorder is running so the mic is settled
+      setTimeout(() => {
+        if (isRecordingRef.current) startSpeechRecognition();
+      }, 300);
 
       const source = audioContext.createMediaStreamSource(stream);
       sourceRef.current = source;
