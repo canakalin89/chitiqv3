@@ -48,6 +48,11 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
     typeof window !== 'undefined' &&
     ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
 
+  const isChromiumBased =
+    typeof window !== 'undefined' &&
+    (/Chrome/.test(navigator.userAgent) || /Edg\//.test(navigator.userAgent)) &&
+    !/SamsungBrowser/.test(navigator.userAgent);
+
   useEffect(() => {
     if (transcriptionEndRef.current) {
       transcriptionEndRef.current.scrollIntoView({ behavior: 'smooth' });
@@ -437,12 +442,23 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
   if (!hasStarted) {
     return (
       <div className="w-full max-w-4xl mx-auto glass rounded-[3rem] p-12 md:p-20 shadow-2xl border border-white/20 dark:border-slate-800 flex flex-col items-center justify-center space-y-10 animate-fade-in min-h-[500px]">
-        {!speechApiSupported && (
-          <div className="w-full px-6 py-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-2xl text-center">
-            <p className="text-sm font-bold text-amber-700 dark:text-amber-400">
+        {!isChromiumBased ? (
+          <div className="w-full px-6 py-4 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-700 rounded-2xl text-center">
+            <p className="text-sm font-black text-rose-700 dark:text-rose-400 mb-1">
+              {i18n.language === 'tr' ? '⚠ Canlı transkript çalışmayabilir' : '⚠ Live transcription may not work'}
+            </p>
+            <p className="text-xs font-medium text-rose-600 dark:text-rose-400">
               {i18n.language === 'tr'
-                ? 'Tarayıcınız anlık yazıya dökme özelliğini desteklemiyor. Kayıt çalışmaya devam edecek ancak anlık döküm görünmeyecektir. Chrome veya Edge kullanmanızı öneririz.'
-                : 'Your browser does not support live transcription. Recording will still work but no live transcript will appear. We recommend Chrome or Edge.'}
+                ? 'Bu özellik yalnızca Google Chrome veya Microsoft Edge tarayıcısında çalışır. Lütfen Chrome veya Edge kullanın.'
+                : 'This feature only works in Google Chrome or Microsoft Edge. Please switch to Chrome or Edge for live transcription.'}
+            </p>
+          </div>
+        ) : (
+          <div className="w-full px-6 py-3 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-700 rounded-2xl text-center">
+            <p className="text-xs font-bold text-emerald-700 dark:text-emerald-400">
+              {i18n.language === 'tr'
+                ? '✓ Chrome / Edge tespit edildi — canlı transkript aktif'
+                : '✓ Chrome / Edge detected — live transcription active'}
             </p>
           </div>
         )}
