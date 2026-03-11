@@ -11,8 +11,7 @@ interface RecorderProps {
 }
 
 const MAX_RECORDING_TIME = 180;
-const SILENCE_THRESHOLD = 0.01;
-const SILENCE_TIMEOUT = 5000;
+const TRANSCRIPTION_INTERVAL_MS = 6000;
 
 const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
   const { t, i18n } = useTranslation();
@@ -22,42 +21,30 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
   const [isReviewing, setIsReviewing] = useState(false);
   const [timer, setTimer] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [isSilent, setIsSilent] = useState(false);
   const [transcription, setTranscription] = useState('');
-  const [interimTranscript, setInterimTranscript] = useState('');
-  const [recognitionFailed, setRecognitionFailed] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const silenceTimerRef = useRef<any>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationFrameRef = useRef<number | null>(null);
   const transcriptionEndRef = useRef<HTMLDivElement>(null);
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
   const isRecordingRef = useRef(false);
-  const recognitionRestartCountRef = useRef(0);
-
-  const speechApiSupported =
-    typeof window !== 'undefined' &&
-    ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
-
-  const isChromiumBased =
-    typeof window !== 'undefined' &&
-    (/Chrome/.test(navigator.userAgent) || /Edg\//.test(navigator.userAgent)) &&
-    !/SamsungBrowser/.test(navigator.userAgent);
+  const transcriptionChunksRef = useRef<Blob[]>([]);
+  const transcriptionIntervalRef = useRef<any>(null);
+  const mimeTypeRef = useRef('');
 
   useEffect(() => {
     if (transcriptionEndRef.current) {
       transcriptionEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [transcription, interimTranscript]);
+  }, [transcription]);
 
   useEffect(() => {
     return () => cleanup();
@@ -77,13 +64,9 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
         }
       } else if (e.code === 'Enter') {
         e.preventDefault();
-        if (isReviewing) {
-          handleEvaluate();
-        }
+        if (isReviewing) handleEvaluate();
       } else if (e.code === 'KeyR' || e.code === 'Backspace') {
-        if (isReviewing) {
-          handleRetry();
-        }
+        if (isReviewing) handleRetry();
       }
     };
 
@@ -154,89 +137,35 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
     draw();
   };
 
-  const startSpeechRecognition = () => {
-    const SpeechRecognitionClass =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognitionClass) {
-      setRecognitionFailed(true);
-      return;
-    }
-
-    recognitionRestartCountRef.current = 0;
-
-    const createRecognition = () => {
-      const recognition: SpeechRecognition = new SpeechRecognitionClass();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = 'en-US';
-      recognition.maxAlternatives = 1;
-
-      recognition.onstart = () => {
-        setRecognitionFailed(false);
-      };
-
-      recognition.onresult = (event: SpeechRecognitionEvent) => {
-        recognitionRestartCountRef.current = 0; // reset on any result
-        let finalTranscript = '';
-        let interim = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          if (event.results[i].isFinal) {
-            finalTranscript += event.results[i][0].transcript + ' ';
-          } else {
-            interim += event.results[i][0].transcript;
-          }
-        }
-        if (finalTranscript) {
-          setTranscription(prev => prev + finalTranscript);
-        }
-        setInterimTranscript(interim);
-      };
-
-      recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-        console.warn('SpeechRecognition error:', event.error);
-        if (
-          event.error === 'not-allowed' ||
-          event.error === 'service-not-allowed' ||
-          event.error === 'audio-capture' ||
-          event.error === 'network' ||
-          event.error === 'service-not-available'
-        ) {
-          setRecognitionFailed(true);
-        }
-        // 'no-speech' and 'aborted' are normal, handled by onend restart
-      };
-
-      recognition.onend = () => {
-        if (!isRecordingRef.current) return;
-        if (recognitionRestartCountRef.current >= 50) {
-          setRecognitionFailed(true);
-          return;
-        }
-        recognitionRestartCountRef.current += 1;
-        // Small delay before restarting to avoid rapid loops
-        setTimeout(() => {
-          if (!isRecordingRef.current) return;
-          try {
-            recognition.start();
-          } catch {
-            // Create a fresh instance if restart fails
-            const fresh = createRecognition();
-            recognitionRef.current = fresh;
-            try { fresh.start(); } catch {}
-          }
-        }, 300);
-      };
-
-      return recognition;
-    };
-
-    const recognition = createRecognition();
-    recognitionRef.current = recognition;
+  const transcribeChunks = async (chunks: Blob[], mimeType: string) => {
+    if (chunks.length === 0) return;
+    setIsTranscribing(true);
     try {
-      recognition.start();
-    } catch (e) {
-      console.warn('SpeechRecognition.start() failed:', e);
-      setRecognitionFailed(true);
+      const blob = new Blob(chunks, { type: mimeType || 'audio/webm' });
+      const arrayBuffer = await blob.arrayBuffer();
+      const uint8Array = new Uint8Array(arrayBuffer);
+      let binary = '';
+      for (let i = 0; i < uint8Array.length; i++) {
+        binary += String.fromCharCode(uint8Array[i]);
+      }
+      const audioBase64 = btoa(binary);
+
+      const response = await fetch('/api/transcribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audioBase64, mimeType: mimeType || 'audio/webm' }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.transcript) {
+          setTranscription(prev => prev ? prev + ' ' + data.transcript : data.transcript);
+        }
+      }
+    } catch {
+      // silently continue on network errors
+    } finally {
+      setIsTranscribing(false);
     }
   };
 
@@ -245,7 +174,7 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
-    } catch (err: any) {
+    } catch {
       setError(t('errors.micPermission'));
       return;
     }
@@ -265,57 +194,42 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
 
     try {
       const mimeType = getSupportedMimeType();
+      mimeTypeRef.current = mimeType;
       const mediaRecorder = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
+      transcriptionChunksRef.current = [];
 
       mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) audioChunksRef.current.push(event.data);
+        if (event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+          transcriptionChunksRef.current.push(event.data);
+        }
       };
       mediaRecorder.start(1000);
 
-      // Start speech recognition after MediaRecorder is running so the mic is settled
-      setTimeout(() => {
-        if (isRecordingRef.current) startSpeechRecognition();
-      }, 300);
+      // Every 6 seconds, send accumulated chunks to Gemini for transcription
+      transcriptionIntervalRef.current = setInterval(() => {
+        const chunks = transcriptionChunksRef.current.splice(0);
+        if (chunks.length > 0) {
+          transcribeChunks(chunks, mimeTypeRef.current);
+        }
+      }, TRANSCRIPTION_INTERVAL_MS);
 
+      // Visualizer only — no ScriptProcessor to avoid mic interference
       const source = audioContext.createMediaStreamSource(stream);
       sourceRef.current = source;
 
       const analyser = audioContext.createAnalyser();
       analyser.fftSize = 256;
       analyserRef.current = analyser;
-      drawVisualizer();
 
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
-      processorRef.current = processor;
-      source.connect(analyser);
-      analyser.connect(processor);
-      // Connect to a silent destination instead of speakers to avoid echo
-      // cancellation suppressing the microphone input for SpeechRecognition
       const silentDest = audioContext.createMediaStreamDestination();
-      processor.connect(silentDest);
+      source.connect(analyser);
+      analyser.connect(silentDest);
 
-      processor.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0);
-
-        // Silence detection
-        let sum = 0;
-        for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
-        const rms = Math.sqrt(sum / inputData.length);
-        if (rms < SILENCE_THRESHOLD) {
-          if (!silenceTimerRef.current) {
-            silenceTimerRef.current = setTimeout(() => setIsSilent(true), SILENCE_TIMEOUT);
-          }
-        } else {
-          setIsSilent(false);
-          if (silenceTimerRef.current) {
-            clearTimeout(silenceTimerRef.current);
-            silenceTimerRef.current = null;
-          }
-        }
-      };
-    } catch (err: any) {
+      drawVisualizer();
+    } catch {
       setError(t('errors.generic'));
       cleanup();
     }
@@ -325,7 +239,12 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
     if (!isRecording) return;
     setIsRecording(false);
     isRecordingRef.current = false;
-    setInterimTranscript('');
+
+    if (transcriptionIntervalRef.current) {
+      clearInterval(transcriptionIntervalRef.current);
+      transcriptionIntervalRef.current = null;
+    }
+
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.onstop = () => {
         const blob = new Blob(audioChunksRef.current, { type: mediaRecorderRef.current?.mimeType || 'audio/webm' });
@@ -342,9 +261,7 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
   };
 
   const handleEvaluate = () => {
-    if (audioBlob) {
-      onStop(audioBlob);
-    }
+    if (audioBlob) onStop(audioBlob);
   };
 
   const handleRetry = () => {
@@ -357,24 +274,20 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
     setHasStarted(false);
     setTimer(0);
     setTranscription('');
-    setInterimTranscript('');
-    setRecognitionFailed(false);
-    recognitionRestartCountRef.current = 0;
+    setIsTranscribing(false);
   };
 
   const cleanup = () => {
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
     if (streamRef.current) streamRef.current.getTracks().forEach(track => track.stop());
     if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-      try { audioContextRef.current.close(); } catch (e) {}
+      try { audioContextRef.current.close(); } catch {}
     }
-    if (processorRef.current) processorRef.current.disconnect();
     if (analyserRef.current) analyserRef.current.disconnect();
     if (sourceRef.current) sourceRef.current.disconnect();
-    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-    if (recognitionRef.current) {
-      try { recognitionRef.current.stop(); } catch {}
-      recognitionRef.current = null;
+    if (transcriptionIntervalRef.current) {
+      clearInterval(transcriptionIntervalRef.current);
+      transcriptionIntervalRef.current = null;
     }
   };
 
@@ -453,26 +366,6 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
   if (!hasStarted) {
     return (
       <div className="w-full max-w-4xl mx-auto glass rounded-[3rem] p-12 md:p-20 shadow-2xl border border-white/20 dark:border-slate-800 flex flex-col items-center justify-center space-y-10 animate-fade-in min-h-[500px]">
-        {!isChromiumBased ? (
-          <div className="w-full px-6 py-4 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-700 rounded-2xl text-center">
-            <p className="text-sm font-black text-rose-700 dark:text-rose-400 mb-1">
-              {i18n.language === 'tr' ? '⚠ Canlı transkript çalışmayabilir' : '⚠ Live transcription may not work'}
-            </p>
-            <p className="text-xs font-medium text-rose-600 dark:text-rose-400">
-              {i18n.language === 'tr'
-                ? 'Bu özellik yalnızca Google Chrome veya Microsoft Edge tarayıcısında çalışır. Lütfen Chrome veya Edge kullanın.'
-                : 'This feature only works in Google Chrome or Microsoft Edge. Please switch to Chrome or Edge for live transcription.'}
-            </p>
-          </div>
-        ) : (
-          <div className="w-full px-6 py-3 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-700 rounded-2xl text-center">
-            <p className="text-xs font-bold text-emerald-700 dark:text-emerald-400">
-              {i18n.language === 'tr'
-                ? '✓ Chrome / Edge tespit edildi — canlı transkript aktif'
-                : '✓ Chrome / Edge detected — live transcription active'}
-            </p>
-          </div>
-        )}
         <div className="text-center space-y-4">
           <h3 className="text-3xl md:text-4xl font-black text-slate-900 dark:text-white tracking-tight leading-tight italic">"{topic}"</h3>
           <p className="text-slate-500 dark:text-slate-400 font-bold uppercase tracking-widest text-xs">{t('recorder.readyPrompt')}</p>
@@ -519,36 +412,24 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
           <h3 className="text-slate-900 dark:text-white font-black text-2xl md:text-3xl truncate max-w-3xl mx-auto drop-shadow-sm italic">"{topic}"</h3>
         </div>
 
-        {/* Transcription Area */}
         <div className="flex-1 overflow-y-auto mb-8 bg-white/40 dark:bg-slate-950/40 rounded-[2rem] p-8 border border-white/40 dark:border-slate-800/50 shadow-inner custom-scrollbar backdrop-blur-sm">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2 opacity-60">
-              {recognitionFailed
-                ? <div className="w-2 h-2 rounded-full bg-rose-500"></div>
-                : <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></div>}
-              <span className="text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-slate-400">{t('recorder.liveLabel')}</span>
-              {recognitionFailed && (
-                <span className="text-[10px] font-bold text-rose-500 uppercase tracking-widest ml-1">
-                  {i18n.language === 'tr' ? '— Transkript kullanılamıyor' : '— Transcription unavailable'}
-                </span>
-              )}
-            </div>
+          <div className="flex items-center gap-2 mb-4 opacity-60">
+            <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></div>
+            <span className="text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-slate-400">
+              {t('recorder.liveLabel')}
+            </span>
+            {isTranscribing && (
+              <span className="text-[10px] font-bold text-indigo-500 uppercase tracking-widest ml-1">
+                {i18n.language === 'tr' ? '— yazılıyor...' : '— transcribing...'}
+              </span>
+            )}
           </div>
           <p className="text-lg md:text-xl font-bold text-slate-700 dark:text-slate-200 leading-relaxed transition-all duration-300">
-            {transcription || interimTranscript
-              ? <>{transcription}<span className="text-slate-400 italic">{interimTranscript}</span></>
-              : recognitionFailed
-                ? <span className="text-rose-400 italic font-medium text-sm">
-                    {i18n.language === 'tr'
-                      ? 'Tarayıcı ses tanıma başlatılamadı. Kayıt devam ediyor — değerlendirme için kullanılabilir.'
-                      : 'Browser speech recognition could not start. Recording still works — audio will be used for evaluation.'}
-                  </span>
-                : <span className="text-slate-400 italic font-medium">{t('recorder.listening')}</span>}
+            {transcription || <span className="text-slate-400 italic font-medium">{t('recorder.listening')}</span>}
           </p>
           <div ref={transcriptionEndRef} />
         </div>
 
-        {/* Accuracy Note */}
         <div className="mb-4 px-6 py-2 bg-slate-100/50 dark:bg-slate-800/50 rounded-xl border border-slate-200/50 dark:border-slate-700/50 text-center">
           <p className="text-[10px] font-bold text-slate-500 dark:text-slate-400 leading-tight">
             <span className="text-indigo-500">ℹ</span> {t('recorder.liveNote')}
@@ -561,12 +442,6 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
             <MicIcon className="w-7 h-7 text-indigo-600 dark:text-indigo-400" />
           </div>
         </div>
-
-        {isSilent && timer > 3 && (
-          <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-16 bg-amber-500 text-white px-8 py-2.5 rounded-full text-sm font-black animate-bounce shadow-xl z-20 uppercase tracking-widest">
-            {t('recorder.speakUp')}
-          </div>
-        )}
       </div>
 
       <div className="bg-white dark:bg-slate-900 p-10 flex justify-center gap-8 border-t border-slate-200/50 dark:border-slate-800/50 z-30">
