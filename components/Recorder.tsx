@@ -11,10 +11,9 @@ interface RecorderProps {
 }
 
 const MAX_RECORDING_TIME = 180;
-const TRANSCRIPTION_INTERVAL_MS = 6000;
 
 const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
 
   const [hasStarted, setHasStarted] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -34,17 +33,7 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
   const streamRef = useRef<MediaStream | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationFrameRef = useRef<number | null>(null);
-  const transcriptionEndRef = useRef<HTMLDivElement>(null);
   const isRecordingRef = useRef(false);
-  const transcriptionChunksRef = useRef<Blob[]>([]);
-  const transcriptionIntervalRef = useRef<any>(null);
-  const mimeTypeRef = useRef('');
-
-  useEffect(() => {
-    if (transcriptionEndRef.current) {
-      transcriptionEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [transcription]);
 
   useEffect(() => {
     return () => cleanup();
@@ -137,11 +126,8 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
     draw();
   };
 
-  const transcribeChunks = async (chunks: Blob[], mimeType: string) => {
-    if (chunks.length === 0) return;
-    setIsTranscribing(true);
+  const fetchTranscription = async (blob: Blob, mimeType: string): Promise<string> => {
     try {
-      const blob = new Blob(chunks, { type: mimeType || 'audio/webm' });
       const arrayBuffer = await blob.arrayBuffer();
       const uint8Array = new Uint8Array(arrayBuffer);
       let binary = '';
@@ -158,15 +144,10 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
 
       if (response.ok) {
         const data = await response.json();
-        if (data.transcript) {
-          setTranscription(prev => prev ? prev + ' ' + data.transcript : data.transcript);
-        }
+        return data.transcript ?? '';
       }
-    } catch {
-      // silently continue on network errors
-    } finally {
-      setIsTranscribing(false);
-    }
+    } catch {}
+    return '';
   };
 
   const startRecording = async () => {
@@ -194,29 +175,16 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
 
     try {
       const mimeType = getSupportedMimeType();
-      mimeTypeRef.current = mimeType;
       const mediaRecorder = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
-      transcriptionChunksRef.current = [];
 
       mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          audioChunksRef.current.push(event.data);
-          transcriptionChunksRef.current.push(event.data);
-        }
+        if (event.data.size > 0) audioChunksRef.current.push(event.data);
       };
       mediaRecorder.start(1000);
 
-      // Every 6 seconds, send accumulated chunks to Gemini for transcription
-      transcriptionIntervalRef.current = setInterval(() => {
-        const chunks = transcriptionChunksRef.current.splice(0);
-        if (chunks.length > 0) {
-          transcribeChunks(chunks, mimeTypeRef.current);
-        }
-      }, TRANSCRIPTION_INTERVAL_MS);
-
-      // Visualizer only — no ScriptProcessor to avoid mic interference
+      // Visualizer only
       const source = audioContext.createMediaStreamSource(stream);
       sourceRef.current = source;
 
@@ -240,19 +208,19 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
     setIsRecording(false);
     isRecordingRef.current = false;
 
-    if (transcriptionIntervalRef.current) {
-      clearInterval(transcriptionIntervalRef.current);
-      transcriptionIntervalRef.current = null;
-    }
-
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.onstop = () => {
-        const blob = new Blob(audioChunksRef.current, { type: mediaRecorderRef.current?.mimeType || 'audio/webm' });
+      const mimeType = mediaRecorderRef.current.mimeType;
+      mediaRecorderRef.current.onstop = async () => {
+        const blob = new Blob(audioChunksRef.current, { type: mimeType || 'audio/webm' });
         setAudioBlob(blob);
-        const url = URL.createObjectURL(blob);
-        setAudioUrl(url);
-        setIsReviewing(true);
+        setAudioUrl(URL.createObjectURL(blob));
         cleanup();
+
+        setIsTranscribing(true);
+        const text = await fetchTranscription(blob, mimeType || 'audio/webm');
+        setTranscription(text);
+        setIsTranscribing(false);
+        setIsReviewing(true);
       };
       mediaRecorderRef.current.stop();
     } else {
@@ -274,7 +242,6 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
     setHasStarted(false);
     setTimer(0);
     setTranscription('');
-    setIsTranscribing(false);
   };
 
   const cleanup = () => {
@@ -285,10 +252,6 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
     }
     if (analyserRef.current) analyserRef.current.disconnect();
     if (sourceRef.current) sourceRef.current.disconnect();
-    if (transcriptionIntervalRef.current) {
-      clearInterval(transcriptionIntervalRef.current);
-      transcriptionIntervalRef.current = null;
-    }
   };
 
   const formatTime = (seconds: number) => {
@@ -308,6 +271,32 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
         <div className="flex flex-col sm:flex-row gap-4 justify-center">
           <button onClick={onCancel} className="px-10 py-4 bg-white dark:bg-slate-800 border-2 border-slate-100 dark:border-slate-700 rounded-2xl shadow-sm text-slate-700 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 font-bold transition-all">{t('common.goBack')}</button>
           <button onClick={() => window.location.reload()} className="px-10 py-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl shadow-xl shadow-indigo-500/30 font-bold transition-all transform hover:scale-105">{t('common.retry')}</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (isTranscribing) {
+    return (
+      <div className="w-full max-w-4xl mx-auto glass rounded-[2.5rem] shadow-2xl border border-white/20 dark:border-slate-800 overflow-hidden flex flex-col items-center justify-center h-[700px] animate-fade-in">
+        <div className="flex flex-col items-center gap-8">
+          <div className="relative w-24 h-24">
+            <div className="absolute inset-0 rounded-full border-4 border-indigo-200 dark:border-indigo-900"></div>
+            <div className="absolute inset-0 rounded-full border-4 border-indigo-600 border-t-transparent animate-spin"></div>
+            <div className="absolute inset-0 flex items-center justify-center">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-10 h-10 text-indigo-600 dark:text-indigo-400">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+              </svg>
+            </div>
+          </div>
+          <div className="text-center">
+            <p className="text-xl font-black text-slate-800 dark:text-white mb-2">
+              {t('recorder.transcribing') || 'Transcribing your speech...'}
+            </p>
+            <p className="text-slate-500 dark:text-slate-400 font-medium text-sm">
+              {t('recorder.transcribingHint') || 'This will only take a moment.'}
+            </p>
+          </div>
         </div>
       </div>
     );
@@ -410,30 +399,6 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
       <div className="flex-1 relative flex flex-col p-8 overflow-hidden bg-gradient-to-b from-slate-50/30 to-white/30 dark:from-slate-900/30 dark:to-slate-950/30">
         <div className="text-center z-10 mb-8">
           <h3 className="text-slate-900 dark:text-white font-black text-2xl md:text-3xl truncate max-w-3xl mx-auto drop-shadow-sm italic">"{topic}"</h3>
-        </div>
-
-        <div className="flex-1 overflow-y-auto mb-8 bg-white/40 dark:bg-slate-950/40 rounded-[2rem] p-8 border border-white/40 dark:border-slate-800/50 shadow-inner custom-scrollbar backdrop-blur-sm">
-          <div className="flex items-center gap-2 mb-4 opacity-60">
-            <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></div>
-            <span className="text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-slate-400">
-              {t('recorder.liveLabel')}
-            </span>
-            {isTranscribing && (
-              <span className="text-[10px] font-bold text-indigo-500 uppercase tracking-widest ml-1">
-                {i18n.language === 'tr' ? '— yazılıyor...' : '— transcribing...'}
-              </span>
-            )}
-          </div>
-          <p className="text-lg md:text-xl font-bold text-slate-700 dark:text-slate-200 leading-relaxed transition-all duration-300">
-            {transcription || <span className="text-slate-400 italic font-medium">{t('recorder.listening')}</span>}
-          </p>
-          <div ref={transcriptionEndRef} />
-        </div>
-
-        <div className="mb-4 px-6 py-2 bg-slate-100/50 dark:bg-slate-800/50 rounded-xl border border-slate-200/50 dark:border-slate-700/50 text-center">
-          <p className="text-[10px] font-bold text-slate-500 dark:text-slate-400 leading-tight">
-            <span className="text-indigo-500">ℹ</span> {t('recorder.liveNote')}
-          </p>
         </div>
 
         <div className="relative w-full h-[100px] flex items-center justify-center">
