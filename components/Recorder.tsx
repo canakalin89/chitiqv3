@@ -11,7 +11,7 @@ interface RecorderProps {
 }
 
 const MAX_RECORDING_TIME = 180;
-const SILENCE_THRESHOLD = 0.008;
+const SILENCE_THRESHOLD = 0.01;
 const SILENCE_TIMEOUT = 5000;
 
 const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
@@ -24,6 +24,7 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
   const [error, setError] = useState<string | null>(null);
   const [isSilent, setIsSilent] = useState(false);
   const [transcription, setTranscription] = useState('');
+  const [interimTranscript, setInterimTranscript] = useState('');
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
 
@@ -49,7 +50,7 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
     if (transcriptionEndRef.current) {
       transcriptionEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [transcription]);
+  }, [transcription, interimTranscript]);
 
   useEffect(() => {
     return () => cleanup();
@@ -158,14 +159,18 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
 
     recognition.onresult = (event: SpeechRecognitionEvent) => {
       let finalTranscript = '';
+      let interim = '';
       for (let i = event.resultIndex; i < event.results.length; i++) {
         if (event.results[i].isFinal) {
           finalTranscript += event.results[i][0].transcript + ' ';
+        } else {
+          interim += event.results[i][0].transcript;
         }
       }
       if (finalTranscript) {
         setTranscription(prev => prev + finalTranscript);
       }
+      setInterimTranscript(interim);
     };
 
     recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
@@ -269,6 +274,7 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
     if (!isRecording) return;
     setIsRecording(false);
     isRecordingRef.current = false;
+    setInterimTranscript('');
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.onstop = () => {
         const blob = new Blob(audioChunksRef.current, { type: mediaRecorderRef.current?.mimeType || 'audio/webm' });
@@ -300,6 +306,7 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
     setHasStarted(false);
     setTimer(0);
     setTranscription('');
+    setInterimTranscript('');
   };
 
   const cleanup = () => {
@@ -457,7 +464,9 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
             </div>
           </div>
           <p className="text-lg md:text-xl font-bold text-slate-700 dark:text-slate-200 leading-relaxed transition-all duration-300">
-            {transcription || <span className="text-slate-400 italic font-medium">{t('recorder.listening')}</span>}
+            {transcription || interimTranscript
+              ? <>{transcription}<span className="text-slate-400 italic">{interimTranscript}</span></>
+              : <span className="text-slate-400 italic font-medium">{t('recorder.listening')}</span>}
           </p>
           <div ref={transcriptionEndRef} />
         </div>
