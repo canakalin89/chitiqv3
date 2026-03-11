@@ -25,6 +25,7 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
   const [isSilent, setIsSilent] = useState(false);
   const [transcription, setTranscription] = useState('');
   const [interimTranscript, setInterimTranscript] = useState('');
+  const [recognitionFailed, setRecognitionFailed] = useState(false);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
 
@@ -41,10 +42,16 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
   const transcriptionEndRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const isRecordingRef = useRef(false);
+  const recognitionRestartCountRef = useRef(0);
 
   const speechApiSupported =
     typeof window !== 'undefined' &&
     ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
+
+  const isChromiumBased =
+    typeof window !== 'undefined' &&
+    (/Chrome/.test(navigator.userAgent) || /Edg\//.test(navigator.userAgent)) &&
+    !/SamsungBrowser/.test(navigator.userAgent);
 
   useEffect(() => {
     if (transcriptionEndRef.current) {
@@ -150,47 +157,85 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
   const startSpeechRecognition = () => {
     const SpeechRecognitionClass =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognitionClass) return;
+    if (!SpeechRecognitionClass) {
+      setRecognitionFailed(true);
+      return;
+    }
 
-    const recognition: SpeechRecognition = new SpeechRecognitionClass();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
+    recognitionRestartCountRef.current = 0;
 
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
-      let finalTranscript = '';
-      let interim = '';
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        if (event.results[i].isFinal) {
-          finalTranscript += event.results[i][0].transcript + ' ';
-        } else {
-          interim += event.results[i][0].transcript;
+    const createRecognition = () => {
+      const recognition: SpeechRecognition = new SpeechRecognitionClass();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = 'en-US';
+      recognition.maxAlternatives = 1;
+
+      recognition.onstart = () => {
+        setRecognitionFailed(false);
+      };
+
+      recognition.onresult = (event: SpeechRecognitionEvent) => {
+        let finalTranscript = '';
+        let interim = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          if (event.results[i].isFinal) {
+            finalTranscript += event.results[i][0].transcript + ' ';
+          } else {
+            interim += event.results[i][0].transcript;
+          }
         }
-      }
-      if (finalTranscript) {
-        setTranscription(prev => prev + finalTranscript);
-      }
-      setInterimTranscript(interim);
-    };
+        if (finalTranscript) {
+          setTranscription(prev => prev + finalTranscript);
+        }
+        setInterimTranscript(interim);
+      };
 
-    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-      if (event.error !== 'no-speech' && event.error !== 'audio-capture') {
+      recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
         console.warn('SpeechRecognition error:', event.error);
-      }
+        if (
+          event.error === 'not-allowed' ||
+          event.error === 'service-not-allowed' ||
+          event.error === 'audio-capture' ||
+          event.error === 'network' ||
+          event.error === 'service-not-available'
+        ) {
+          setRecognitionFailed(true);
+        }
+        // 'no-speech' and 'aborted' are normal, handled by onend restart
+      };
+
+      recognition.onend = () => {
+        if (!isRecordingRef.current) return;
+        if (recognitionRestartCountRef.current >= 10) {
+          setRecognitionFailed(true);
+          return;
+        }
+        recognitionRestartCountRef.current += 1;
+        // Small delay before restarting to avoid rapid loops
+        setTimeout(() => {
+          if (!isRecordingRef.current) return;
+          try {
+            recognition.start();
+          } catch {
+            // Create a fresh instance if restart fails
+            const fresh = createRecognition();
+            recognitionRef.current = fresh;
+            try { fresh.start(); } catch {}
+          }
+        }, 300);
+      };
+
+      return recognition;
     };
 
-    recognition.onend = () => {
-      // Auto-restart if still recording (browser stops after silence)
-      if (isRecordingRef.current) {
-        try { recognition.start(); } catch { /* already started */ }
-      }
-    };
-
+    const recognition = createRecognition();
     recognitionRef.current = recognition;
     try {
       recognition.start();
     } catch (e) {
       console.warn('SpeechRecognition.start() failed:', e);
+      setRecognitionFailed(true);
     }
   };
 
@@ -307,6 +352,8 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
     setTimer(0);
     setTranscription('');
     setInterimTranscript('');
+    setRecognitionFailed(false);
+    recognitionRestartCountRef.current = 0;
   };
 
   const cleanup = () => {
@@ -400,12 +447,23 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
   if (!hasStarted) {
     return (
       <div className="w-full max-w-4xl mx-auto glass rounded-[3rem] p-12 md:p-20 shadow-2xl border border-white/20 dark:border-slate-800 flex flex-col items-center justify-center space-y-10 animate-fade-in min-h-[500px]">
-        {!speechApiSupported && (
-          <div className="w-full px-6 py-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-700 rounded-2xl text-center">
-            <p className="text-sm font-bold text-amber-700 dark:text-amber-400">
+        {!isChromiumBased ? (
+          <div className="w-full px-6 py-4 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-700 rounded-2xl text-center">
+            <p className="text-sm font-black text-rose-700 dark:text-rose-400 mb-1">
+              {i18n.language === 'tr' ? '⚠ Canlı transkript çalışmayabilir' : '⚠ Live transcription may not work'}
+            </p>
+            <p className="text-xs font-medium text-rose-600 dark:text-rose-400">
               {i18n.language === 'tr'
-                ? 'Tarayıcınız anlık yazıya dökme özelliğini desteklemiyor. Kayıt çalışmaya devam edecek ancak anlık döküm görünmeyecektir. Chrome veya Edge kullanmanızı öneririz.'
-                : 'Your browser does not support live transcription. Recording will still work but no live transcript will appear. We recommend Chrome or Edge.'}
+                ? 'Bu özellik yalnızca Google Chrome veya Microsoft Edge tarayıcısında çalışır. Lütfen Chrome veya Edge kullanın.'
+                : 'This feature only works in Google Chrome or Microsoft Edge. Please switch to Chrome or Edge for live transcription.'}
+            </p>
+          </div>
+        ) : (
+          <div className="w-full px-6 py-3 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-700 rounded-2xl text-center">
+            <p className="text-xs font-bold text-emerald-700 dark:text-emerald-400">
+              {i18n.language === 'tr'
+                ? '✓ Chrome / Edge tespit edildi — canlı transkript aktif'
+                : '✓ Chrome / Edge detected — live transcription active'}
             </p>
           </div>
         )}
@@ -459,14 +517,27 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
         <div className="flex-1 overflow-y-auto mb-8 bg-white/40 dark:bg-slate-950/40 rounded-[2rem] p-8 border border-white/40 dark:border-slate-800/50 shadow-inner custom-scrollbar backdrop-blur-sm">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2 opacity-60">
-              <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></div>
+              {recognitionFailed
+                ? <div className="w-2 h-2 rounded-full bg-rose-500"></div>
+                : <div className="w-2 h-2 rounded-full bg-indigo-500 animate-pulse"></div>}
               <span className="text-[10px] font-black uppercase tracking-widest text-slate-500 dark:text-slate-400">{t('recorder.liveLabel')}</span>
+              {recognitionFailed && (
+                <span className="text-[10px] font-bold text-rose-500 uppercase tracking-widest ml-1">
+                  {i18n.language === 'tr' ? '— Transkript kullanılamıyor' : '— Transcription unavailable'}
+                </span>
+              )}
             </div>
           </div>
           <p className="text-lg md:text-xl font-bold text-slate-700 dark:text-slate-200 leading-relaxed transition-all duration-300">
             {transcription || interimTranscript
               ? <>{transcription}<span className="text-slate-400 italic">{interimTranscript}</span></>
-              : <span className="text-slate-400 italic font-medium">{t('recorder.listening')}</span>}
+              : recognitionFailed
+                ? <span className="text-rose-400 italic font-medium text-sm">
+                    {i18n.language === 'tr'
+                      ? 'Tarayıcı ses tanıma başlatılamadı. Kayıt devam ediyor — değerlendirme için kullanılabilir.'
+                      : 'Browser speech recognition could not start. Recording still works — audio will be used for evaluation.'}
+                  </span>
+                : <span className="text-slate-400 italic font-medium">{t('recorder.listening')}</span>}
           </p>
           <div ref={transcriptionEndRef} />
         </div>
