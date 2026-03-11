@@ -288,7 +288,10 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
       processorRef.current = processor;
       source.connect(analyser);
       analyser.connect(processor);
-      processor.connect(audioContext.destination);
+      // Connect to a silent destination instead of speakers to avoid echo
+      // cancellation suppressing the microphone input for SpeechRecognition
+      const silentDest = audioContext.createMediaStreamDestination();
+      processor.connect(silentDest);
 
       processor.onaudioprocess = (e) => {
         const inputData = e.inputBuffer.getChannelData(0);
