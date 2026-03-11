@@ -157,7 +157,10 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
   const startSpeechRecognition = () => {
     const SpeechRecognitionClass =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognitionClass) return;
+    if (!SpeechRecognitionClass) {
+      setRecognitionFailed(true);
+      return;
+    }
 
     recognitionRestartCountRef.current = 0;
 
@@ -170,7 +173,6 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
 
       recognition.onstart = () => {
         setRecognitionFailed(false);
-        recognitionRestartCountRef.current = 0;
       };
 
       recognition.onresult = (event: SpeechRecognitionEvent) => {
@@ -191,13 +193,16 @@ const Recorder: React.FC<RecorderProps> = ({ onStop, onCancel, topic }) => {
 
       recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
         console.warn('SpeechRecognition error:', event.error);
-        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-          setRecognitionFailed(true);
-        } else if (event.error === 'audio-capture') {
-          // microphone conflict — mark failed, don't restart
+        if (
+          event.error === 'not-allowed' ||
+          event.error === 'service-not-allowed' ||
+          event.error === 'audio-capture' ||
+          event.error === 'network' ||
+          event.error === 'service-not-available'
+        ) {
           setRecognitionFailed(true);
         }
-        // 'no-speech' is normal, will be handled by onend restart
+        // 'no-speech' and 'aborted' are normal, handled by onend restart
       };
 
       recognition.onend = () => {
